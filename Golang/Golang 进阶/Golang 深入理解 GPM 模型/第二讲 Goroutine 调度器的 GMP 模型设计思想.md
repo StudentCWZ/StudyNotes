@@ -62,3 +62,5 @@
     - go build 并且运行之后，会得到一个 trace.out 文件
 
 2. 通过 go tool trace 工具打开 trace 文件: go tool trace trace.out
+
+3. 通过 Debug trace 查看 GMP 信息：GODEBUG=schedtrace=1000 ./可执行程序
