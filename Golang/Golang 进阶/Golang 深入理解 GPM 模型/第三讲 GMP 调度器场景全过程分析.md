@@ -32,3 +32,6 @@
     - M2 尝试从全局队列(简称 GQ)取一批 G 放到 P2 的本地队列(函数：findrunnable())。
     - M2 从全局队列取的 G 数量符合下面的公式：`n = min(len(GQ)/GOMAXPROCS+1, len(GQ/2))`
 
+## 场景八
+
+1.
