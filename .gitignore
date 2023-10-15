@@ -14,8 +14,11 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-# Mac platform
+### macOS template
+# General
 .DS_Store
+.AppleDouble
+.LSOverride
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
