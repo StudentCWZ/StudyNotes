@@ -260,7 +260,7 @@
 
    ```Go
    func Test_slice(t *testing.T){
-     s := []int{2,3,4}
+     s := []int{2, 3, 4}
      // [2, 3, 4] -> [-1, 3, 4]
      changeSlice(s)
    }
@@ -551,7 +551,7 @@
    func Test_slice(t *testing.T){
        s := []int{0, 1, 2, 3, 4}
        // 删除 index = 2 的元素
-       s = append(s[:2],s[3:]...)
+       s = append(s[:2], s[3:]...)
        // s: [0, 1, 3, 4], len: 4, cap: 5
        t.Logf("s: %v, len: %d, cap: %d", s, len(s), cap(s))
    }
