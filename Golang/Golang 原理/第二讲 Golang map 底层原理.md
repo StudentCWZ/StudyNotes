@@ -243,3 +243,284 @@
 
      <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E6%89%A9%E5%AE%B9%E8%BF%87%E7%A8%8B.png" alt="map 扩容过程" style="zoom:50%;" />
 
+## 3 数据结构
+
+#### 3-1 hmap
+
+1. hmap 数据结构如下
+
+   ![hmap 数据结构](https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/hmap%20%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84.png)
+
+   2. hmap 结构体如下：
+
+      ```Go
+      type hmap struct {
+          count     int 
+          flags     uint8
+          B         uint8  
+          noverflow uint16 
+          hash0     uint32 
+          buckets    unsafe.Pointer 
+          oldbuckets unsafe.Pointer 
+          nevacuate  uintptr       
+          extra *mapextra 
+      }
+      ```
+
+   3. hmap 结构体的字段含义如下：
+      - **count**: map 中的 key-value 总数
+      - **flags**: map 状态标识，可以标识出 map 是否被 goroutine 并发读写
+      - **B**: 桶数组长度的指数，桶数组长度为 2 ^ B
+      - **noverflow**: map 中溢出桶的数量
+      - **hash0**: hash 随机因子，生成 key 的 hash 值时会使用到
+      - **buckets**: 桶数组
+      - **oldbuckets**: 扩容过程中老的桶数组
+      - **nevacuate**: 扩容时的进度标识，index 小于 nevacuate 的桶都已经由老桶转移到新桶中
+      - **extra**: 预申请的溢出桶
+
+### 3-2 mapextra
+
+1. mapextra 数据结构如下
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/mapextra%20%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84.png" alt="mapextra 数据结构" style="zoom:50%;" />
+
+2. mapextra 结构体如下：
+
+   ```Go
+   type mapextra struct {
+       overflow    *[]*bmap
+       oldoverflow *[]*bmap
+   
+   
+       nextOverflow *bmap
+   }
+   ```
+
+2. 在 map 初始化时，倘若容量过大，会提前申请好一批溢出桶，以供后续使用，这部分溢出桶存放在 hmap.mapextra 当中：
+   - **mapextra.overflow**: 供桶数组 buckets 使用的溢出桶
+   - **mapextra.oldoverFlow**: 扩容流程中，供老桶数组 oldBuckets 使用的溢出桶
+   - **mapextra.nextOverflow**: 下一个可用的溢出桶
+
+### 3-3 bmap
+
+1. bmp 数据结构如下
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/bmap%20%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84.png" alt="bmap 数据结构" style="zoom:50%;" />
+
+2. bmp 结构体如下
+
+   ```Go
+   const bucketCnt = 8
+   type bmap struct {
+       tophash [bucketCnt]uint8
+   }
+   ```
+
+3. bmp 结构体字段如下
+
+   - bmap 就是 map 中的桶，可以存储 8 组 key-value 对的数据，以及一个指向下一个溢出桶的指针
+
+   - 每组 key-value 对数据包含 key 高 8 位 hash 值 tophash，key 和 val 三部分
+
+   - 在代码层面只展示了 tophash 部分，但由于 tophash、key 和 val 的数据长度固定，因此可以通过内存地址偏移的方式寻找到后续的 key 数组、val 数组以及溢出桶指针
+
+   - 为方便理解，把完整的 bmap 类声明代码补充如下：
+
+     ```Go
+     type bmap struct {
+         tophash [bucketCnt]uint8
+         keys [bucketCnt]T
+         values [bucketCnt]T
+         overflow uint8
+     }
+     ```
+
+## 4 构造方法
+
+1. map 构造过程
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E6%9E%84%E9%80%A0%E8%BF%87%E7%A8%8B.png" alt="map 构造过程" style="zoom:50%;" />
+
+2. 创建 map 时，实际上会调用 runtime/map.go 文件中的 makemap 方法，下面对源码展开分析：
+
+### 4-1 makemap
+
+1. 方法主干源码一览：
+
+   ```Go
+   func makemap(t *maptype, hint int, h *hmap) *hmap {
+       mem, overflow := math.MulUintptr(uintptr(hint), t.bucket.size)
+       if overflow || mem > maxAlloc {
+           hint = 0
+       }
+   
+   
+       if h == nil {
+           h = new(hmap)
+       }
+       h.hash0 = fastrand()
+   
+   
+       B := uint8(0)
+       for overLoadFactor(hint, B) {
+           B++
+       }
+       h.B = B
+   
+   
+       if h.B != 0 {
+           var nextOverflow *bmap
+           h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
+           if nextOverflow != nil {
+               h.extra = new(mapextra)
+               h.extra.nextOverflow = nextOverflow
+           }
+       }
+   
+   
+       return
+   ```
+
+2. hint 为 map 拟分配的容量；在分配前，会提前对拟分配的内存大小进行判断，倘若超限，会将 hint 置为零
+
+   ```Go
+   mem, overflow := math.MulUintptr(uintptr(hint), t.bucket.size)
+   if overflow || mem > maxAlloc {
+      hint = 0
+   }
+
+3. 通过 new 方法初始化 hmap
+
+   ```Go
+   if h == nil {
+      h = new(hmap)
+   }
+   ```
+
+4. 调用 fastrand，构造 hash 因子：hmap.hash0
+
+   ```Go
+   h.hash0 = fastrand()
+   ```
+
+5. 大致上基于 log2(B) >= hint 的思路(具体见 4-2 小节 overLoadFactor 方法的介绍)，计算桶数组的容量 B
+
+   ```Go
+   B := uint8(0)
+   for overLoadFactor(hint, B) {
+       B++
+   }
+   h.B = B
+   ```
+
+6. 调用 makeBucketArray 方法，初始化桶数组 hmap.buckets；
+
+   ```Go
+   var nextOverflow *bmap
+   h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
+   ```
+
+7. 倘若 map 容量较大，会提前申请一批溢出桶 hmap.extra
+
+   ```Go
+   if nextOverflow != nil {
+      h.extra = new(mapextra)
+      h.extra.nextOverflow = nextOverflow
+   }
+   ```
+
+### 4-2 overLoadFactor
+
+1. 通过 overLoadFactor 方法，对 map 预分配容量和桶数组长度指数进行判断，决定是否仍需要增长 B 的数值：
+
+   ```Go
+   const loadFactorNum = 13
+   const loadFactorDen = 2
+   const goarch.PtrSize = 8
+   const bucketCnt = 8
+   
+   
+   func overLoadFactor(count int, B uint8) bool {
+       return count > bucketCnt && uintptr(count) > loadFactorNum*(bucketShift(B)/loadFactorDen)
+   }
+   
+   
+   func bucketShift(b uint8) uintptr {
+       return uintptr(1) << (b & (goarch.PtrSize*8 - 1))
+   ```
+
+   - 倘若 map 预分配容量小于等于 8，B 取 0，桶的个数为 1
+   - 保证 map 预分配容量小于等于桶数组长度 * 6.5
+
+2. map 预分配容量、桶数组长度指数、桶数组长度之间的关系如下表：
+
+   |           **kv 对数量**           | **桶数组长度指数 B** | **桶数组长度 2^B** |
+   | :-------------------------------: | :------------------: | :----------------: |
+   |               0 ~ 8               |          0           |         1          |
+   |              9 ~ 13               |          1           |         2          |
+   |              14 ~ 26              |          2           |         4          |
+   |              27 ~ 52              |          3           |         8          |
+   | 2 ^ (B-1) * 6.5 + 1 ~ 2 ^ B * 6.5 |          B           |        2^B         |
+
+### 4-3 makeBucketArray
+
+1. makeBucketArray 方法会进行桶数组的初始化，并根据桶的数量决定是否需要提前作溢出桶的初始化. 方法主干代码如下：
+
+   ```Go
+   func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets unsafe.Pointer, nextOverflow *bmap) {
+       base := bucketShift(b)
+       nbuckets := base
+       if b >= 4 {
+           nbuckets += bucketShift(b - 4)
+       }
+       
+       buckets = newarray(t.bucket, int(nbuckets))
+      
+       if base != nbuckets {
+           nextOverflow = (*bmap)(add(buckets, base*uintptr(t.bucketsize)))
+           last := (*bmap)(add(buckets, (nbuckets-1)*uintptr(t.bucketsize)))
+           last.setoverflow(t, (*bmap)(buckets))
+       }
+       return buckets, nextOverflow
+   }
+   ```
+
+2. makeBucketArray 会为 map 的桶数组申请内存，在桶数组的指数 b >= 4 时(桶数组的容量 >= 52)，会需要提前创建溢出桶。
+
+3. 通过 base 记录桶数组的长度，不包含溢出桶；通过 nbuckets 记录累加上溢出桶后，桶数组的总长度。
+
+   ```Go
+   base := bucketShift(b)
+   nbuckets := base
+   if b >= 4 {
+      nbuckets += bucketShift(b - 4)
+   }
+   ```
+
+4. 调用 newarray 方法为桶数组申请内存空间，连带着需要初始化的溢出桶：
+
+   ```Go
+   buckets = newarray(t.bucket, int(nbuckets))
+   ```
+
+5. 倘若 base != nbuckets，说明需要创建溢出桶，会基于地址偏移的方式，通过 nextOverflow 指向首个溢出桶的地址。
+
+   ```Go
+   if base != nbuckets {
+      nextOverflow = (*bmap)(add(buckets, base*uintptr(t.bucketsize)))
+      last := (*bmap)(add(buckets, (nbuckets-1)*uintptr(t.bucketsize)))
+      last.setoverflow(t, (*bmap)(buckets))
+   }
+   return buckets, nextOverflow
+   ```
+
+6. 倘若需要创建溢出桶，会在将最后一个溢出桶的 overflow 指针指向 buckets 数组，以此来标识申请的溢出桶已经用完。
+
+   ```Go
+   func (b *bmap) setoverflow(t *maptype, ovf *bmap) {
+       *(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-goarch.PtrSize)) = ovf
+   }
+   ```
+
+## 5 读流程
+
