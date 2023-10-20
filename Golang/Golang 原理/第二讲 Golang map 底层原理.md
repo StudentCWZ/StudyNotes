@@ -251,32 +251,33 @@
 
    ![hmap 数据结构](https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/hmap%20%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84.png)
 
-   2. hmap 结构体如下：
+2. hmap 结构体如下：
 
-      ```Go
-      type hmap struct {
-          count     int 
-          flags     uint8
-          B         uint8  
-          noverflow uint16 
-          hash0     uint32 
-          buckets    unsafe.Pointer 
-          oldbuckets unsafe.Pointer 
-          nevacuate  uintptr       
-          extra *mapextra 
-      }
-      ```
+   ```Go
+   type hmap struct {
+       count     int 
+       flags     uint8
+       B         uint8  
+       noverflow uint16 
+       hash0     uint32 
+       buckets    unsafe.Pointer 
+       oldbuckets unsafe.Pointer 
+       nevacuate  uintptr       
+       extra *mapextra 
+   }
+   ```
 
-   3. hmap 结构体的字段含义如下：
-      - **count**: map 中的 key-value 总数
-      - **flags**: map 状态标识，可以标识出 map 是否被 goroutine 并发读写
-      - **B**: 桶数组长度的指数，桶数组长度为 2 ^ B
-      - **noverflow**: map 中溢出桶的数量
-      - **hash0**: hash 随机因子，生成 key 的 hash 值时会使用到
-      - **buckets**: 桶数组
-      - **oldbuckets**: 扩容过程中老的桶数组
-      - **nevacuate**: 扩容时的进度标识，index 小于 nevacuate 的桶都已经由老桶转移到新桶中
-      - **extra**: 预申请的溢出桶
+3. hmap 结构体的字段含义如下：
+
+   - **count**: map 中的 key-value 总数
+   - **flags**: map 状态标识，可以标识出 map 是否被 goroutine 并发读写
+   - **B**: 桶数组长度的指数，桶数组长度为 2 ^ B
+   - **noverflow**: map 中溢出桶的数量
+   - **hash0**: hash 随机因子，生成 key 的 hash 值时会使用到
+   - **buckets**: 桶数组
+   - **oldbuckets**: 扩容过程中老的桶数组
+   - **nevacuate**: 扩容时的进度标识，index 小于 nevacuate 的桶都已经由老桶转移到新桶中
+   - **extra**: 预申请的溢出桶
 
 ### 3-2 mapextra
 
