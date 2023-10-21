@@ -525,3 +525,210 @@
 
 ## 5 读流程
 
+1. map 读流程如下：
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E8%AF%BB%E6%B5%81%E7%A8%8B.png" alt="map 读流程" style="zoom:50%;" />
+
+### 5-1 读流程梳理
+
+1. map 读流程主要分为以下几步：
+   - 根据 key 取 hash 值
+   - 根据 hash 值对桶数组取模，确定所在的桶
+   - 沿着桶链表依次遍历各个桶内的 key-value 对
+   - 命中相同的 key，则返回 value；倘若 key 不存在，则返回零值
+2. map 读操作最终会走进 runtime/map.go 的 mapaccess 方法中，下面开始阅读源码：
+
+### 5-2 mapaccess 方法源码走读
+
+1. mapaccess 相关源码如下：
+
+   ```Go
+   func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+       if h == nil || h.count == 0 {
+           return unsafe.Pointer(&zeroVal[0])
+       }
+       if h.flags&hashWriting != 0 {
+           fatal("concurrent map read and map write")
+       }
+       hash := t.hasher(key, uintptr(h.hash0))
+       m := bucketMask(h.B)
+       b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
+       if c := h.oldbuckets; c != nil {
+           if !h.sameSizeGrow() {
+               m >>= 1
+           }
+           oldb := (*bmap)(add(c, (hash&m)*uintptr(t.bucketsize)))
+           if !evacuated(oldb) {
+               b = oldb
+           }
+       }
+       top := tophash(hash)
+   bucketloop:
+       for ; b != nil; b = b.overflow(t) {
+           for i := uintptr(0); i < bucketCnt; i++ {
+               if b.tophash[i] != top {
+                   if b.tophash[i] == emptyRest {
+                       break bucketloop
+                   }
+                   continue
+               }
+               k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+               if t.indirectkey() {
+                   k = *((*unsafe.Pointer)(k))
+               }
+               if t.key.equal(key, k) {
+                   e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+                   if t.indirectelem() {
+                       e = *((*unsafe.Pointer)(e))
+                   }
+                   return e
+               }
+           }
+       }
+       return unsafe.Pointer(&zeroVal[0])
+   }
+   
+   
+   func (h *hmap) sameSizeGrow() bool {
+       return h.flags&sameSizeGrow != 0
+   }
+   
+   
+   func evacuated(b *bmap) bool {
+       h := b.tophash[0]
+       return h > emptyOne && h < minTopHash
+   }
+   ```
+
+2. 倘若 map 未初始化，或此时存在 key-value 对数量为 0，直接返回零值
+
+   ```Go
+   if h == nil || h.count == 0 {
+       return unsafe.Pointer(&zeroVal[0])
+   }
+   ```
+
+3. 倘若发现存在其他 goroutine 在写 map，直接抛出并发读写的 fatal error；其中，并发写标记，位于 hmap.flags 的第 3 个 bit 位
+
+   ```Go
+   const hashWriting  = 4
+    
+    if h.flags&hashWriting != 0 {
+           fatal("concurrent map read and map write")
+    }
+   ```
+
+4. 通过 maptype.hasher() 方法计算得到 key 的 hash 值，并对桶数组长度取模，取得对应的桶. 关于 hash 方法的内部实现，golang 并未暴露。
+
+   ```Go
+   hash := t.hasher(key, uintptr(h.hash0))
+    m := bucketMask(h.B)
+    b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize))
+   ```
+
+5. 其中，bucketMast 方法会根据 B 求得桶数组长度 - 1 的值，用于后续的 & 运算，实现取模的效果：
+
+   ```Go
+   func bucketMask(b uint8) uintptr {
+       return bucketShift(b) - 1
+   }
+   ```
+
+6. 在取桶时，会关注当前 map 是否处于扩容的流程，倘若是的话，需要在老的桶数组 oldBuckets 中取桶，通过 evacuated 方法判断桶数据是已迁到新桶还是仍存留在老桶，倘若仍在老桶，需要取老桶进行遍历。
+
+   ```Go
+   if c := h.oldbuckets; c != nil {
+       if !h.sameSizeGrow() {
+           m >>= 1
+       }
+       oldb := (*bmap)(add(c, (hash&m)*uintptr(t.bucketsize)))
+       if !evacuated(oldb) {
+           b = oldb
+       }
+    }
+   ```
+
+7. 在取老桶前，会先判断 map 的扩容流程是否是增量扩容，倘若是的话，说明老桶数组的长度是新桶数组的一半，需要将桶长度值 m 除以 2。
+
+   ```Go
+   const (
+       sameSizeGrow = 8
+   )
+   
+   
+   func (h *hmap) sameSizeGrow() bool {
+       return h.flags&sameSizeGrow != 0
+   }
+   ```
+
+8. 取老桶时，会调用 evacuated 方法判断数据是否已经迁移到新桶. 判断的方式是，取桶中首个 tophash 值，倘若该值为 2, 3, 4 中的一个，都代表数据已经完成迁移。
+
+   ```Go
+   const emptyOne = 1
+   const evacuatedX = 2
+   const evacuatedY = 3
+   const evacuatedEmpty = 4 
+   const minTopHash = 5
+   
+   
+   func evacuated(b *bmap) bool {
+       h := b.tophash[0]
+       return h > emptyOne && h < minTopHash
+   }
+   ```
+
+9. 取 key hash 值的高 8 位值 top. 倘若该值 < 5，会累加 5，以避开 0 ~ 4 的取值. 因为这几个值会用于枚举，具有一些特殊的含义。
+
+   ```Go
+   const minTopHash = 5
+   
+   
+   top := tophash(hash)
+   
+   
+   func tophash(hash uintptr) uint8 {
+       top := uint8(hash >> (goarch.PtrSize*8 - 8))
+       if top < minTopHash {
+           top += minTopHash
+       }
+       return top
+   ```
+
+10. 开启两层 for 循环进行遍历流程，外层基于桶链表，依次遍历首个桶和后续的每个溢出桶，内层依次遍历一个桶内的 key-value 对。
+
+    ```Go
+    bucketloop:
+    for ; b != nil; b = b.overflow(t) {
+        for i := uintptr(0); i < bucketCnt; i++ {
+            // ...
+        }
+    }
+    return unsafe.Pointer(&zeroVal[0])
+    ```
+
+11. 内存遍历时，首先查询高 8 位的 tophash 值，看是否和 key 的 top 值匹配。
+
+12. 倘若不匹配且当前位置 tophash 值为 0，说明桶的后续位置都未放入过元素，当前 key 在 map 中不存在，可以直接打破循环，返回零值。
+
+    ```Go
+    const emptyRest = 0
+    if b.tophash[i] != top {
+        if b.tophash[i] == emptyRest {
+              break bucketloop
+        }
+        continue
+    }
+    ```
+
+13. 倘若找到了相等的 key，则通过地址偏移的方式取到 value 并返回。
+
+14. 其中 dataOffset 为一个桶中 tophash 数组所占用的空间大小。
+
+    ```Go
+    if t.key.equal(key, k) {
+         e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+         return e
+    }
+    ```
+
+15. 倘若遍历完成，仍未找到匹配的目标，返回零值兜底。
