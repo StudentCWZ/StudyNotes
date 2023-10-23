@@ -732,3 +732,642 @@
     ```
 
 15. 倘若遍历完成，仍未找到匹配的目标，返回零值兜底。
+
+## 6 写流程
+
+1. map 写流程如下：
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E5%86%99%E6%B5%81%E7%A8%8B.png" alt="map 写流程" style="zoom:50%;" />
+
+### 6-1 写流程梳理
+
+1. map 写流程主要分为以下几步：
+   - 根据 key 取 hash 值
+   - 根据 hash 值对桶数组取模，确定所在的桶
+   - 倘若 map 处于扩容，则迁移命中的桶，帮助推进渐进式扩容
+   - 沿着桶链表依次遍历各个桶内的 key-value 对
+   - 倘若命中相同的 key，则对 value 中进行更新
+   - 倘若 key 不存在，则插入 key-value 对
+   - 倘若发现 map 达成扩容条件，则会开启扩容模式，并重新返回第 2 步
+2. map 写操作最终会走进 runtime/map.go 的 mapassign 方法中。
+
+### 6-2 mapassign
+
+1. 下面开始阅读 mapassign 方法源码：
+
+   ```Go
+   func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+       if h == nil {
+           panic(plainError("assignment to entry in nil map"))
+       }
+       if h.flags&hashWriting != 0 {
+           fatal("concurrent map writes")
+       }
+       hash := t.hasher(key, uintptr(h.hash0))
+   
+   
+       h.flags ^= hashWriting
+   
+   
+       if h.buckets == nil {
+           h.buckets = newobject(t.bucket) 
+       }
+   
+   
+   again:
+       bucket := hash & bucketMask(h.B)
+       if h.growing() {
+           growWork(t, h, bucket)
+       }
+       b := (*bmap)(add(h.buckets, bucket*uintptr(t.bucketsize)))
+       top := tophash(hash)
+   
+   
+       var inserti *uint8
+       var insertk unsafe.Pointer
+       var elem unsafe.Pointer
+   bucketloop:
+       for {
+           for i := uintptr(0); i < bucketCnt; i++ {
+               if b.tophash[i] != top {
+                   if isEmpty(b.tophash[i]) && inserti == nil {
+                       inserti = &b.tophash[i]
+                       insertk = add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+                       elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+                   }
+                   if b.tophash[i] == emptyRest {
+                       break bucketloop
+                   }
+                   continue
+               }
+               k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+               if t.indirectkey() {
+                   k = *((*unsafe.Pointer)(k))
+               }
+               if !t.key.equal(key, k) {
+                   continue
+               }
+               if t.needkeyupdate() {
+                   typedmemmove(t.key, k, key)
+               }
+               elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+               goto done
+           }
+           ovf := b.overflow(t)
+           if ovf == nil {
+               break
+           }
+           b = ovf
+       }
+   
+   
+       if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
+           hashGrow(t, h)
+           goto again 
+       }
+   
+   
+       if inserti == nil {
+           newb := h.newoverflow(t, b)
+           inserti = &newb.tophash[0]
+           insertk = add(unsafe.Pointer(newb), dataOffset)
+           elem = add(insertk, bucketCnt*uintptr(t.keysize))
+       }
+   
+   
+       if t.indirectkey() {
+           kmem := newobject(t.key)
+           *(*unsafe.Pointer)(insertk) = kmem
+           insertk = kmem
+       }
+       if t.indirectelem() {
+           vmem := newobject(t.elem)
+           *(*unsafe.Pointer)(elem) = vmem
+       }
+       typedmemmove(t.key, insertk, key)
+       *inserti = top
+       h.count++
+   
+   
+   
+   
+   done:
+       if h.flags&hashWriting == 0 {
+           fatal("concurrent map writes")
+       }
+       h.flags &^= hashWriting
+       if t.indirectelem() {
+           elem = *((*unsafe.Pointer)(elem))
+       }
+       retur
+   ```
+
+2. 写操作时，倘若 map 未初始化，直接 panic
+
+   ```Go
+   if h == nil {
+           panic(plainError("assignment to entry in nil map"))
+   }
+   ```
+
+3. 倘若其他 goroutine 在进行写或删操作，抛出并发写 fatal error
+
+   ```Go
+   if h.flags&hashWriting != 0 {
+       fatal("concurrent map writes")
+   }
+   ```
+
+4. 通过 maptype.hasher() 方法求得 key 对应的 hash 值
+
+   ```Go
+   hash := t.hasher(key, uintptr(h.hash0))
+   ```
+
+5. 通过异或位运算，将 map.flags 的第 3 个 bit 位置为 1，添加写标记
+
+   ```Go
+   h.flags ^= hashWriting
+   ```
+
+6. 倘若 map 的桶数组 buckets 未空，则对其进行初始化
+
+   ```Go
+   if h.buckets == nil {
+        h.buckets = newobject(t.bucket) 
+   }
+   ```
+
+7. 找到当前 key 对应的桶索引 bucket
+
+   ```Go
+   bucket := hash & bucketMask(h.B)
+   ```
+
+8. 倘若发现当前 map 正处于扩容过程，则帮助其渐进扩容，具体内容在第 9 节中再作展开
+
+   ```Go
+   if h.growing() {
+           growWork(t, h, bucket)
+   }
+   ```
+
+9. 从 map 的桶数组 buckets 出发，结合桶索引和桶容量大小，进行地址偏移，获得对应桶 b
+
+   ```Go
+   b := (*bmap)(add(h.buckets, bucket*uintptr(t.bucketsize)))
+   ```
+
+10. 取得 key 的高 8 位 tophash
+
+    ```Go
+    top := tophash(hash)
+    ```
+
+11. 提前声明好的三个指针，用于指向存放 key-value 的空槽:
+
+    - inserti：tophash 拟插入位置
+
+    - insertk：key 拟插入位置
+
+    - elem：val 拟插入位置
+
+      ```Go
+      var inserti *uint8
+      var insertk unsafe.Pointer
+      var elem unsafe.Pointer
+      ```
+
+12. 开启两层 for 循环，外层沿着桶链表依次遍历，内层依次遍历桶内的 key-value 对
+
+    ```Go
+    bucketloop:
+        for {
+            for i := uintptr(0); i < bucketCnt; i++ {
+                // ...
+            }
+            ovf := b.overflow(t)
+            if ovf == nil {
+                break
+            }
+            b = ovf
+         }
+    ```
+
+13. 倘若 key 的 tophash 和当前位置 tophash 不同，则会尝试将 inserti、insertk elem 调整指向首个空位，用于后续的插入操作。倘若发现当前位置 tophash 标识为 emtpyRest(0)，则说明当前桶链表后续位置都未空，无需继续遍历，直接 break 遍历流程即可
+
+    ```Go
+    if b.tophash[i] != top {
+          if isEmpty(b.tophash[i]) && inserti == nil {
+                        inserti = &b.tophash[i]
+                        insertk = add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+                        elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+                    }
+                    if b.tophash[i] == emptyRest {
+                        break bucketloop
+                    }
+                    continue
+             }
+    }
+    ```
+
+14. 倘若桶中某个位置的 tophash 标识为 emptyOne(1)，说明当前位置未放入元素，倘若为 emptyRest(0)，说明包括当前位置在内，此后的位置都为空。
+
+    ```Go
+    const emptyRest = 0 
+    const emptyOne = 1 
+    
+    
+    func isEmpty(x uint8) bool {
+        return x <= emptyOne
+    }
+    ```
+
+15. 倘若找到了相等的 key，则执行更新操作，并且直接跳转到方法的 done 标志位处，进行收尾处理
+
+    ```Go
+    k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+        if t.indirectkey() {
+             k = *((*unsafe.Pointer)(k))
+        }
+        if !t.key.equal(key, k) {
+            continue
+        }
+        elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+        goto done
+    ```
+
+16. 倘若没找到相等的 key，会在执行插入操作前，判断 map 是否需要开启扩容模式. 这部分内容在第 9 节中作展开。倘若需要扩容，会在开启扩容模式后，跳转回 again 标志位，重新开始桶的定位以及遍历流程
+
+    ```Go
+    if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
+            hashGrow(t, h)
+            goto again 
+        }
+    ```
+
+17. 倘若遍历完桶链表，都没有为当前待插入的 key-value 对找到空位，则会创建一个新的溢出桶，挂载在桶链表的尾部，并将 inserti、insertk、elem 指向溢出桶的首个空位：
+
+    ```Go
+    if inserti == nil {
+            newb := h.newoverflow(t, b)
+            inserti = &newb.tophash[0]
+            insertk = add(unsafe.Pointer(newb), dataOffset)
+            elem = add(insertk, bucketCnt*uintptr(t.keysize))
+        }
+    ```
+
+18. 创建溢出桶：
+
+    <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/%E5%88%9B%E5%BB%BA%E6%BA%A2%E5%87%BA%E6%A1%B6.png" alt="创建溢出桶" style="zoom:50%;" />
+
+    - 倘若 hmap.extra 中还有剩余可用的溢出桶，则直接获取 hmap.extra.nextOverflow，并将 nextOverflow 调整指向下一个空闲可用的溢出桶
+
+    - 倘若 hmap 已经没有空闲溢出桶了，则创建一个新的溢出桶
+
+    - hmap 的溢出桶数量 hmap.noverflow 累加 1
+
+    - 将新获得的溢出桶添加到原桶链表的尾部
+
+    - 返回溢出桶
+
+      ```Go
+      func (h *hmap) newoverflow(t *maptype, b *bmap) *bmap {
+          var ovf *bmap
+          if h.extra != nil && h.extra.nextOverflow != nil {
+              ovf = h.extra.nextOverflow
+              if ovf.overflow(t) == nil {
+                  h.extra.nextOverflow = (*bmap)(add(unsafe.Pointer(ovf), uintptr(t.bucketsize)))
+              } else {
+                  ovf.setoverflow(t, nil)
+                  h.extra.nextOverflow = nil
+              }
+          } else {
+              ovf = (*bmap)(newobject(t.bucket))
+          }
+          h.incrnoverflow()
+          if t.bucket.ptrdata == 0 {
+              h.createOverflow()
+              *h.extra.overflow = append(*h.extra.overflow, ovf)
+          }
+          b.setoverflow(t, ovf)
+          return ovf
+      }
+      ```
+
+19. 将 tophash、key、value 插入到取得空位中，并且将 map 的 key-value 对计数器 count 值加 1
+
+    ```Go
+    if t.indirectkey() {
+            kmem := newobject(t.key)
+            *(*unsafe.Pointer)(insertk) = kmem
+            insertk = kmem
+        }
+        if t.indirectelem() {
+            vmem := newobject(t.elem)
+            *(*unsafe.Pointer)(elem) = vmem
+        }
+        typedmemmove(t.key, insertk, key)
+        *inserti = top
+        h.count++
+    ```
+
+20. 收尾环节，再次校验是否有其他协程并发写，倘若有，则抛 fatal error. 将 hmap.flags 中的写标记抹去，然后退出方法
+
+    ```Go
+    done:
+        if h.flags&hashWriting == 0 {
+            fatal("concurrent map writes")
+        }
+        h.flags &^= hashWriting
+        if t.indirectelem() {
+            elem = *((*unsafe.Pointer)(elem))
+        }
+        return elem
+    ```
+
+## 7 删流程
+
+1. map 删 k-v 对的流程如下：
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E5%88%A0%E6%B5%81%E7%A8%8B.png" alt="map 删流程" style="zoom:50%;" />
+
+### 7-1 删除 kv 对流程梳理
+
+1. map 删除 kv 对流程主要分为以下几步：
+   - 根据 key 取 hash 值
+   - 根据 hash 值对桶数组取模，确定所在的桶
+   - 倘若 map 处于扩容，则迁移命中的桶，帮助推进渐进式扩容
+   - 沿着桶链表依次遍历各个桶内的 key-value 对
+   - 倘若命中相同的 key，删除对应的 key-value 对；并将当前位置的 tophash 置为 emptyOne，表示为空
+   - 倘若当前位置为末位，或者下一个位置的 tophash 为 emptyRest，则沿当前位置向前遍历，将毗邻的 emptyOne 统一更新为 emptyRest
+2. map 删操作最终会走进 runtime/map.go 的 mapdelete 方法中
+
+### 7-2 mapdelete
+
+1. 下面开始阅读 mapdelete 源码
+
+   ```Go
+   func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
+       if h == nil || h.count == 0 {
+           return
+       }
+       if h.flags&hashWriting != 0 {
+           fatal("concurrent map writes")
+       }
+   
+   
+       hash := t.hasher(key, uintptr(h.hash0))
+   
+   
+       h.flags ^= hashWriting
+   
+   
+       bucket := hash & bucketMask(h.B)
+       if h.growing() {
+           growWork(t, h, bucket)
+       }
+       b := (*bmap)(add(h.buckets, bucket*uintptr(t.bucketsize)))
+       bOrig := b
+       top := tophash(hash)
+   search:
+       for ; b != nil; b = b.overflow(t) {
+           for i := uintptr(0); i < bucketCnt; i++ {
+               if b.tophash[i] != top {
+                   if b.tophash[i] == emptyRest {
+                       break search
+                   }
+                   continue
+               }
+               k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+               k2 := k
+               if t.indirectkey() {
+                   k2 = *((*unsafe.Pointer)(k2))
+               }
+               if !t.key.equal(key, k2) {
+                   continue
+               }
+               // Only clear key if there are pointers in it.
+               if t.indirectkey() {
+                   *(*unsafe.Pointer)(k) = nil
+               } else if t.key.ptrdata != 0 {
+                   memclrHasPointers(k, t.key.size)
+               }
+               e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+               if t.indirectelem() {
+                   *(*unsafe.Pointer)(e) = nil
+               } else if t.elem.ptrdata != 0 {
+                   memclrHasPointers(e, t.elem.size)
+               } else {
+                   memclrNoHeapPointers(e, t.elem.size)
+               }
+               b.tophash[i] = emptyOne
+               if i == bucketCnt-1 {
+                   if b.overflow(t) != nil && b.overflow(t).tophash[0] != emptyRest {
+                       goto notLast
+                   }
+               } else {
+                   if b.tophash[i+1] != emptyRest {
+                       goto notLast
+                   }
+               }
+               for {
+                   b.tophash[i] = emptyRest
+                   if i == 0 {
+                       if b == bOrig {
+                           break
+                       }
+                       c := b
+                       for b = bOrig; b.overflow(t) != c; b = b.overflow(t) {
+                       }
+                       i = bucketCnt - 1
+                   } else {
+                       i--
+                   }
+                   if b.tophash[i] != emptyOne {
+                       break
+                   }
+               }
+           notLast:
+               h.count--
+               if h.count == 0 {
+                   h.hash0 = fastrand()
+               }
+               break search
+           }
+       }
+   
+   
+       if h.flags&hashWriting == 0 {
+           fatal("concurrent map writes")
+       }
+       h.flags &^= hashWritin
+   ```
+
+2. 倘若 map 未初始化或者内部 key-value 对数量为 0，删除时不会报错，直接返回
+
+   ```Go
+   if h == nil || h.count == 0 {
+           return
+   }
+   ```
+
+3. 倘若存在其他 goroutine 在进行写或删操作，抛出并发写的 fatal error
+
+   ```Go
+   if h.flags&hashWriting != 0 {
+       fatal("concurrent map writes")
+   }
+   ```
+
+4. 通过 maptype.hasher() 方法求得 key 对应的 hash 值
+
+   ```Go
+   hash := t.hasher(key, uintptr(h.hash0))
+   ```
+
+5. 通过异或位运算，将 map.flags 的第 3 个 bit 位置为 1，添加写标记
+
+   ```Go
+   h.flags ^= hashWriting
+   ```
+
+6. 找到当前 key 对应的桶索引 bucket
+
+   ```Go
+   bucket := hash & bucketMask(h.B)
+   ```
+
+7. 倘若发现当前 map 正处于扩容过程，则帮助其渐进扩容，具体内容在第 9 节中再作展开；
+
+   ```Go
+   if h.growing() {
+           growWork(t, h, bucket)
+     }
+   ```
+
+8. 从 map 的桶数组 buckets 出发，结合桶索引和桶容量大小，进行地址偏移，获得对应桶 b，并赋值给 bOrig
+
+   ```Go
+   b := (*bmap)(add(h.buckets, bucket*uintptr(t.bucketsize)))
+   bOrig := b
+   ```
+
+9. 取得 key 的高 8 位 tophash：
+
+   ```Go
+   top := tophash(hash)
+   ```
+
+10. 开启两层 for 循环，外层沿着桶链表依次遍历，内层依次遍历桶内的 key-value 对
+
+    ```Go
+    search:
+        for ; b != nil; b = b.overflow(t) {
+            for i := uintptr(0); i < bucketCnt; i++ {
+                // ...
+            }
+        }
+    ```
+
+11. 遍历时，倘若发现当前位置 tophash 值为 emptyRest，则直接结束遍历流程：
+
+    ```Go
+    if b.tophash[i] != top {
+            if b.tophash[i] == emptyRest {
+                 break search
+             }
+             continue
+       }
+    ```
+
+12. 倘若 key 不相等，则继续遍历：
+
+    ```Go
+    k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+       k2 := k
+       if t.indirectkey() {
+            k2 = *((*unsafe.Pointer)(k2))
+        }
+        if !t.key.equal(key, k2) {
+            continue
+        }
+    ```
+
+13. 倘若 key 相等，则删除对应的 key-value 对，并且将当前位置的 tophash 置为 emptyOne：
+
+    ```Go
+    if t.indirectkey() {
+            *(*unsafe.Pointer)(k) = nil
+        } else if t.key.ptrdata != 0 {
+            memclrHasPointers(k, t.key.size)
+        }
+        e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
+        if t.indirectelem() {
+            *(*unsafe.Pointer)(e) = nil
+        } else if t.elem.ptrdata != 0 {
+            memclrHasPointers(e, t.elem.size)
+        } else {
+            memclrNoHeapPointers(e, t.elem.size)
+        }
+        b.tophash[i] = emptyOne
+    ```
+
+14. 倘若当前位置不位于最后一个桶的最后一个位置，或者当前位置的后置位 tophash 不为 emptyRest，则无需向前遍历更新 tophash 标识，直接跳转到 notLast 位置即可
+
+    ```Go
+    if i == bucketCnt-1 {
+            if b.overflow(t) != nil && b.overflow(t).tophash[0] != emptyRest {
+                goto notLast
+            }
+        } else {
+           if b.tophash[i+1] != emptyRest {
+                goto notLast
+            }
+        }
+    ```
+
+15. 向前遍历，将沿途的空位(tophash 为 emptyOne)的 tophash 都更新为 emptySet
+
+    ```Go
+    for {
+                    b.tophash[i] = emptyRest
+                    if i == 0 {
+                        if b == bOrig {
+                            break
+                        }
+                        c := b
+                        for b = bOrig; b.overflow(t) != c; b = b.overflow(t) {
+                        }
+                        i = bucketCnt - 1
+                    } else {
+                        i--
+                    }
+                    if b.tophash[i] != emptyOne {
+                        break
+                    }
+            }
+    ```
+
+16. 倘若成功从 map 中删除了一组 key-value 对，则将 hmap 的计数器 count 值减 1. 倘若 map 中的元素全都被删除完了，会为 map 更换一个新的随机因子 hash0
+
+    ```Go
+    notLast:
+            h.count--
+            if h.count == 0 {
+                h.hash0 = fastrand()
+            }
+            break search
+    ```
+
+17. 收尾环节，再次校验是否有其他协程并发写，倘若有，则抛 fatal error. 将 hmap.flags 中的写标记抹去，然后退出方法
+
+    ```Go
+    if h.flags&hashWriting == 0 {
+            fatal("concurrent map writes")
+        }
+        h.flags &^= hashWri
+    ```
+
+
+
