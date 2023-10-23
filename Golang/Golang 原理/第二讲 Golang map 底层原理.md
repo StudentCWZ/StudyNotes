@@ -1369,5 +1369,760 @@
         h.flags &^= hashWri
     ```
 
+## 8 遍历流程
 
+1. map 遍历流程如下：
 
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E9%81%8D%E5%8E%86%E6%B5%81%E7%A8%8B.png" alt="map 遍历流程" style="zoom:50%;" />
+
+2. map 的遍历流程首先会走进 runtime/map.go 的 mapiterinit() 方法当中，初始化用于遍历的迭代器 hiter；接着会调用 runtime/map.go 的 mapiternext() 方法开启遍历流程。
+
+### 8-1 迭代器数据结构
+
+1. 迭代器数据结构如下：
+
+   ```Go
+   type hiter struct {
+       key         unsafe.Pointer 
+       elem        unsafe.Pointer 
+       t           *maptype
+       h           *hmap
+       buckets     unsafe.Pointer 
+       bptr        *bmap         
+       overflow    *[]*bmap      
+       oldoverflow *[]*bmap      
+       startBucket uintptr       
+       offset      uint8         
+       wrapped     bool         
+       B           uint8
+       i           uint8
+       bucket      uintptr
+       checkBucket uintptr
+   }
+   ```
+
+2. hiter 是遍历 map 时用于存放临时数据的迭代器：
+   - key：指向遍历得到 key 的指针
+   - value：指向遍历得到 value 的指针
+   - t：map 类型，包含了 key、value 类型大小等信息
+   - h：map 的指针
+   - buckets：map 的桶数组
+   - bptr：当前遍历到的桶
+   - overflow：新老桶数组对应的溢出桶
+   - startBucket：遍历起始位置的桶索引
+   - offset：遍历起始位置的 key-value 对索引
+   - wrapped：遍历是否穿越桶数组尾端回到头部了
+   - B：桶数组的长度指数
+   - i：当前遍历到的 key-value 对在桶中的索引
+   - bucket：当前遍历到的桶
+   - checkBucket：因为扩容流程的存在，需要额外检查的桶
+
+### 8-2 mapiterinit
+
+1. map 遍历流程开始时，首先会走进 runtime/map.go 的 mapiterinit() 方法当中，此时会对创建 map 迭代器 hiter，并且通过取随机数的方式，决定遍历的起始桶号，以及起始 key-value 对索引号
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20mapiterinit%20%E6%96%B9%E6%B3%95.png" alt="map mapiterinit 方法" style="zoom:50%;" />
+
+2. mapiterinit 源码
+
+   ```Go
+   func mapiterinit(t *maptype, h *hmap, it *hiter) {
+       it.t = t
+       if h == nil || h.count == 0 {
+           return
+       }
+   
+   
+       it.h = h
+   
+   
+       it.B = h.B
+       it.buckets = h.buckets
+       if t.bucket.ptrdata == 0 {
+           h.createOverflow()
+           it.overflow = h.extra.overflow
+           it.oldoverflow = h.extra.oldoverflow
+       }
+   
+   
+       // decide where to start
+       var r uintptr
+       r = uintptr(fastrand())
+       it.startBucket = r & bucketMask(h.B)
+       it.offset = uint8(r >> h.B & (bucketCnt - 1))
+   
+   
+       // iterator state
+       it.bucket = it.startBucket
+   
+   
+       // Remember we have an iterator.
+       // Can run concurrently with another mapiterinit().
+       if old := h.flags; old&(iterator|oldIterator) != iterator|oldIterator {
+           atomic.Or8(&h.flags, iterator|oldIterator)
+       }
+   
+   
+       mapiternext(
+   ```
+
+3. 通过取随机数的方式，决定遍历时的起始桶，以及桶中起始 key-value 对的位置：
+
+   ```Go
+   var r uintptr
+       r = uintptr(fastrand())
+       it.startBucket = r & bucketMask(h.B)
+       it.offset = uint8(r >> h.B & (bucketCnt - 1))
+   
+   
+   
+   
+       // iterator state
+       it.bucket = it.startB
+   ```
+
+4. 完成迭代器 hiter 中各项参数的初始化后，不如 mapiternext 方法开启遍历
+
+### 8-3 mapiternext
+
+1. mapiternext 源码如下
+
+   ```Go
+   func mapiternext(it *hiter) {
+       h := it.h
+       if h.flags&hashWriting != 0 {
+           fatal("concurrent map iteration and map write")
+       }
+       t := it.t
+       bucket := it.bucket
+       b := it.bptr
+       i := it.i
+       checkBucket := it.checkBucket
+   
+   
+   next:
+       if b == nil {
+           if bucket == it.startBucket && it.wrapped {
+               it.key = nil
+               it.elem = nil
+               return
+           }
+           if h.growing() && it.B == h.B {
+               oldbucket := bucket & it.h.oldbucketmask()
+               b = (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+               if !evacuated(b) {
+                   checkBucket = bucket
+               } else {
+                   b = (*bmap)(add(it.buckets, bucket*uintptr(t.bucketsize)))
+                   checkBucket = noCheck
+               }
+           } else {
+               b = (*bmap)(add(it.buckets, bucket*uintptr(t.bucketsize)))
+               checkBucket = noCheck
+           }
+           bucket++
+           if bucket == bucketShift(it.B) {
+               bucket = 0
+               it.wrapped = true
+           }
+           i = 0
+       }
+       for ; i < bucketCnt; i++ {
+           offi := (i + it.offset) & (bucketCnt - 1)
+           if isEmpty(b.tophash[offi]) || b.tophash[offi] == evacuatedEmpty {
+               continue
+           }
+           k := add(unsafe.Pointer(b), dataOffset+uintptr(offi)*uintptr(t.keysize))
+           if t.indirectkey() {
+               k = *((*unsafe.Pointer)(k))
+           }
+           e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+uintptr(offi)*uintptr(t.elemsize))
+           if checkBucket != noCheck && !h.sameSizeGrow() {
+                   if checkBucket>>(it.B-1) != uintptr(b.tophash[offi]&1) {
+                       continue
+                   }
+               
+           }
+           if (b.tophash[offi] != evacuatedX && b.tophash[offi] != evacuatedY) ||
+               !(t.reflexivekey() || t.key.equal(k, k)) {
+               
+               it.key = k
+               if t.indirectelem() {
+                   e = *((*unsafe.Pointer)(e))
+               }
+               it.elem = e
+           } else {
+               rk, re := mapaccessK(t, h, k)
+               if rk == nil {
+                   continue // key has been deleted
+               }
+               it.key = rk
+               it.elem = re
+           }
+           it.bucket = bucket
+           if it.bptr != b { // avoid unnecessary write barrier; see issue 14921
+               it.bptr = b
+           }
+           it.i = i + 1
+           it.checkBucket = checkBucket
+           return
+       }
+       b = b.overflow(t)
+       i = 0
+       goto next
+   }
+   ```
+
+2. 遍历时发现其他 goroutine 在并发写，直接抛出 fatal error：
+
+   ```Go
+   if h.flags&hashWriting != 0 {
+       fatal("concurrent map iteration and map write")
+   }
+   ```
+
+3. 开启最外圈的循环，依次遍历桶数组中的每个桶链表，通过 next 和 goto next 关键字实现循环代码块
+
+   ```Go
+   next:
+       if b == nil {
+           // ...
+           b = (*bmap)(add(it.buckets, bucket*uintptr(t.bucketsize)))
+           // 
+           bucket++
+           if bucket == bucketShift(it.B) {
+               bucket = 0
+               it.wrapped = true
+           }
+           i = 0
+       }
+       // ...
+       b = b.overflow(t)
+       // ...
+       goto next
+   }
+   ```
+
+4. 倘若已经遍历完所有的桶，重新回到起始桶为止，则直接结束方法
+
+   ```Go
+   if bucket == it.startBucket && it.wrapped {
+        it.key = nil
+        it.elem = nil
+        return
+     }
+   ```
+
+5. 倘若 map 处于扩容流程，取桶时兼容新老桶数组的逻辑. 倘若桶处于旧桶数组且未完成迁移，需要将 checkBucket 置为当前的桶号
+
+   ```Go
+   if h.growing() && it.B == h.B {
+        oldbucket := bucket & it.h.oldbucketmask()
+        b = (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+        if !evacuated(b) {
+             checkBucket = bucket
+        } else {
+             b = (*bmap)(add(it.buckets, bucket*uintptr(t.bucketsize)))
+             checkBucket = noCheck
+        }
+    } else {
+        b = (*bmap)(add(it.buckets, bucket*uintptr(t.bucketsize)))
+        checkBucket = noCheck
+    }
+   ```
+
+6. 遍历的桶号加 1，倘若来到桶数组末尾，则将桶号置为 0. 将 key-value 对的遍历索引 i 置为 0
+
+   ```Go
+   bucket++
+   if bucket == bucketShift(it.B) {
+        bucket = 0
+        it.wrapped = true
+   }
+   i = 0
+   ```
+
+7. 依次遍历各个桶中每个 key-value 对：
+
+   ```Go
+   for ; i < bucketCnt; i++ {
+           // ...
+           return
+       }
+   ```
+
+8. 倘若遍历到的桶属于旧桶数组未迁移完成的桶，需要按照其在新桶中的顺序完成遍历. 比如，增量扩容流程中，旧桶中的 key-value 对最终应该被分散迁移到新桶数组的 x、y 两个区域，则此时遍历时，哪怕 key-value 对仍存留在旧桶中未完成迁移，遍历时也应该严格按照其在新桶数组中的顺序来执行
+
+   ```Go
+   if checkBucket != noCheck && !h.sameSizeGrow() {
+               
+                   if checkBucket>>(it.B-1) != uintptr(b.tophash[offi]&1) {
+                       continue
+               }
+           }
+   ```
+
+9. 执行 mapaccessK 方法，基于读流程方法获取 key-value 对，通过迭代 hiter 的 key、value 指针进行接收，用于对用户的遍历操作进行响应：
+
+   ```Go
+   rk, re := mapaccessK(t, h, k)
+   if rk == nil {
+         continue // key has been deleted
+   }
+   it.key = rk
+   it.elem = re
+   ```
+
+## 9 扩容
+
+### 9-1 扩容类型
+
+1. map 扩容类型
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E6%89%A9%E5%AE%B9%E7%B1%BB%E5%9E%8B.png" alt="map 扩容类型" style="zoom:50%;" />
+
+2. map 的扩容类型分为两类，一类叫做增量扩容，一类叫做等量扩容。
+3. **增量扩容**
+   - 表现：扩容后，桶数组的长度增长为原长度的 2 倍
+   - 目的：降低每个桶中 key-value 对的数量，优化 map 操作的时间复杂度
+4. **等量扩容**
+   - 表现：扩容后，桶数组的长度和之前保持一致；但是溢出桶的数量会下降
+   - 目的：提高桶主体结构的数据填充率，减少溢出桶数量，避免发生内存泄漏
+
+### 9-2 何时扩容
+
+1. 只有 map 的写流程可能开启扩容模式
+
+2. 写 map 新插入 key-value 对之前，会发起是否需要扩容的逻辑判断：
+
+   ```Go
+   func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
+       // ...
+       
+       if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
+           hashGrow(t, h)
+           goto again
+       }
+   
+   
+       // ...
+   }
+   ```
+
+3. 根据 hmap 的 oldbuckets 是否空，可以判断 map 此前是否已开启扩容模式：
+
+```Go
+func (h *hmap) growing() bool {
+    return h.oldbuckets != nil
+}
+```
+
+4. 倘若此前未进入扩容模式，且 map 中 key-value 对的数量超过 8 个，且大于桶数组长度的 6.5 倍，则进入增量扩容：
+
+   ```Go
+   const(
+      loadFactorNum = 13
+      loadFactorDen = 2
+      bucketCnt = 8
+   )
+   
+   
+   func overLoadFactor(count int, B uint8) bool {
+       return count > bucketCnt && uintptr(count) > loadFactorNum*(bucketShift(B)/loadFactorDen)
+   }
+   ```
+
+5. 倘若溢出桶的数量大于 2^B 个(即桶数组的长度；B 大于 15 时取 15)，则进入等量扩容：
+
+   ```Go
+   func tooManyOverflowBuckets(noverflow uint16, B uint8) bool {
+       if B > 15 {
+           B = 15
+       }
+       return noverflow >= uint16(1)<<(B&15)
+   }
+   ```
+
+### 9-3 如何开启扩容模式
+
+1. 开启扩容模式的方法位于 runtime/map.go 的 hashGrow 方法中：
+
+   ```Go
+   func hashGrow(t *maptype, h *hmap) {
+       bigger := uint8(1)
+       if !overLoadFactor(h.count+1, h.B) {
+           bigger = 0
+           h.flags |= sameSizeGrow
+       }
+       oldbuckets := h.buckets
+       newbuckets, nextOverflow := makeBucketArray(t, h.B+bigger, nil)
+   
+   
+   
+   
+       flags := h.flags &^ (iterator | oldIterator)
+       if h.flags&iterator != 0 {
+           flags |= oldIterator
+       }
+       // commit the grow (atomic wrt gc)
+       h.B += bigger
+       h.flags = flags
+       h.oldbuckets = oldbuckets
+       h.buckets = newbuckets
+       h.nevacuate = 0
+       h.noverflow = 0
+   
+   
+       if h.extra != nil && h.extra.overflow != nil {
+           // Promote current overflow buckets to the old generation.
+           if h.extra.oldoverflow != nil {
+               throw("oldoverflow is not nil")
+           }
+           h.extra.oldoverflow = h.extra.overflow
+           h.extra.overflow = nil
+       }
+       if nextOverflow != nil {
+           if h.extra == nil {
+               h.extra = new(mapextra)
+           }
+           h.extra.nextOverflow = nextOverflow
+       }
+   ```
+
+2. 倘若是增量扩容，bigger 值取 1；倘若是等量扩容，bigger 值取 0，并将 hmap.flags 的第 4 个 bit 位置为 1，标识当前处于等量扩容流程
+
+   ```Go
+   const sameSizeGrow = 8
+   
+   
+   bigger := uint8(1)
+   if !overLoadFactor(h.count+1, h.B) {
+       bigger = 0
+       h.flags |= sameSizeGrow
+   }
+   ```
+
+3. 将原桶数组赋值给 oldBuckets，并创建新的桶数组和一批新的溢出桶。此处会通过变量 bigger，实现不同扩容模式下，新桶数组长度的区别处理
+
+   ```Go
+   oldbuckets := h.buckets
+       newbuckets, nextOverflow := makeBucketArray(t, h.B+bigger, nil)
+   ```
+
+4. 更新 hmap 的桶数组长度指数 B，flag 标识，并将新、老桶数组赋值给 hmap.oldBuckets 和 hmap.buckets；扩容迁移进度 hmap.nevacuate 标记为 0；新桶数组的溢出桶数量 hmap.noverflow 置为 0
+
+   ```Go
+   flags := h.flags &^ (iterator | oldIterator)
+       if h.flags&iterator != 0 {
+           flags |= oldIterator
+       }
+       // commit the grow (atomic wrt gc)
+       h.B += bigger
+       h.flags = flags
+       h.oldbuckets = oldbuckets
+       h.buckets = newbuckets
+       h.nevacuate = 0
+       h.noverflow = 0
+   ```
+
+5. 将原本存量可用的溢出桶赋给 hmap.extra.oldoverflow；倘若存在下一个可用的溢出桶，赋给 hmap.extra.nextOverflow
+
+   ```Go
+   if h.extra != nil && h.extra.overflow != nil {
+           h.extra.oldoverflow = h.extra.overflow
+           h.extra.overflow = nil
+       }
+       if nextOverflow != nil {
+           if h.extra == nil {
+               h.extra = new(mapextra)
+           }
+           h.extra.nextOverflow = nextOverflow
+     }
+   ```
+
+### 9-4 扩容迁移规则
+
+1. 增量扩容流程
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/%E5%A2%9E%E9%87%8F%E6%89%A9%E5%AE%B9%E6%B5%81%E7%A8%8B.png" alt="增量扩容流程" style="zoom:50%;" />
+
+   - 在等量扩容中，新桶数组长度与原桶数组相同
+   - key-value 对在新桶数组和老桶数组的中的索引号保持一致
+   - 在增量扩容中，新桶数组长度为原桶数组的两倍
+   - 把新桶数组中桶号对应于老桶数组的区域称为 x 区域，新扩展的区域称为 y 区域
+   - 实际上，一个 key 属于哪个桶，取决于其 hash 值对桶数组长度取模得到的结果，因此依赖于其低位的 hash 值结果.
+   - 在增量扩容流程中，新桶数组的长度会扩展一位，假定 key 原本从属的桶号为 i，则在新桶数组中从属的桶号只可能是 i (x 区域)或者 i + 老桶数组长度(y 区域)
+   - 当 key 低位 hash 值向左扩展一位的 bit 位为 0，则应该迁往 x 区域的 i 位置；倘若该 bit 位为 1，应该迁往 y 区域对应的 i + 老桶数组长度的位置
+
+## 9-5 渐进式扩容
+
+1. map 采用的是渐进扩容的方式，避免因为一次性的全量数据迁移引发性能抖动。
+
+2. 当每次触发写、删操作时，会为处于扩容流程中的 map 完成两组桶的数据迁移：
+
+   - 一组桶是当前写、删操作所命中的桶
+
+   - 另一组桶是，当前未迁移的桶中，索引最小的那个桶
+
+     ```Go
+     func growWork(t *maptype, h *hmap, bucket uintptr) {
+         // make sure we evacuate the oldbucket corresponding
+         // to the bucket we're about to use
+         evacuate(t, h, bucket&h.oldbucketmask())
+     
+     
+         // evacuate one more oldbucket to make progress on growing
+         if h.growing() {
+             evacuate(t, h, h.nevacuate)
+         }
+     }
+     ```
+
+3. 渐进式扩容流程
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/map%20%E6%B8%90%E8%BF%91%E5%BC%8F%E6%89%A9%E5%AE%B9.png" alt="map 渐近式扩容" style="zoom:50%;" />
+
+4. 数据迁移的逻辑位于 runtime/map.go 的 evacuate 方法当中：
+
+   ```Go
+   func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
+       // 入参中，oldbucket 为当前要迁移的桶在旧桶数组中的索引
+       // 获取到待迁移桶的内存地址 b
+       b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+       // 获取到旧桶数组的容量 newbit
+       newbit := h.noldbuckets()
+       // evacuated 方法判断出桶 b 是否已经迁移过了，未迁移过，才进入此 if 分支进行迁移处理
+       if !evacuated(b) {
+           // 通过一个二元数组 xy 指向当前桶可能迁移到的目的桶
+           // x = xy[0]，代表新桶数组中索引和旧桶数组一致的桶
+           // y = xy[1]，代表新桶数组中，索引为原索引加上旧桶容量的桶，只在增量扩容中会使用到
+           var xy [2]evacDst
+           x := &xy[0]
+           x.b = (*bmap)(add(h.buckets, oldbucket*uintptr(t.bucketsize)))
+           x.k = add(unsafe.Pointer(x.b), dataOffset)
+           x.e = add(x.k, bucketCnt*uintptr(t.keysize))
+   
+   
+           // 只有进入增量扩容的分支，才需要对 y 进行初始化
+           if !h.sameSizeGrow() {
+               // Only calculate y pointers if we're growing bigger.
+               // Otherwise GC can see bad pointers.
+               y := &xy[1]
+               y.b = (*bmap)(add(h.buckets, (oldbucket+newbit)*uintptr(t.bucketsize)))
+               y.k = add(unsafe.Pointer(y.b), dataOffset)
+               y.e = add(y.k, bucketCnt*uintptr(t.keysize))
+           }
+   
+   
+           // 外层 for 循环，遍历桶 b 和对应的溢出桶
+           for ; b != nil; b = b.overflow(t) {
+               // k,e 分别记录遍历桶时，当前的 key 和 value 的指针
+               k := add(unsafe.Pointer(b), dataOffset)
+               e := add(k, bucketCnt*uintptr(t.keysize))
+               // 遍历桶内的 key-value 对
+               for i := 0; i < bucketCnt; i, k, e = i+1, add(k, uintptr(t.keysize)), add(e, uintptr(t.elemsize)) {
+                   top := b.tophash[i]
+                   if isEmpty(top) {
+                       b.tophash[i] = evacuatedEmpty
+                       continue
+                   }
+                   if top < minTopHash {
+                       throw("bad map state")
+                   }
+                   k2 := k
+                   if t.indirectkey() {
+                       k2 = *((*unsafe.Pointer)(k2))
+                   }
+                   var useY uint8
+                   if !h.sameSizeGrow() {
+                       // Compute hash to make our evacuation decision (whether we need
+                       // to send this key/elem to bucket x or bucket y).
+                       hash := t.hasher(k2, uintptr(h.hash0))
+                       if hash&newbit != 0 {
+                          useY = 1
+                       }
+                   }
+                   b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
+                   dst := &xy[useY]                 // evacuation destination
+                   if dst.i == bucketCnt {
+                       dst.b = h.newoverflow(t, dst.b)
+                       dst.i = 0
+                       dst.k = add(unsafe.Pointer(dst.b), dataOffset)
+                       dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
+                   }
+                   dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
+                   if t.indirectkey() {
+                       *(*unsafe.Pointer)(dst.k) = k2 // copy pointer
+                   } else {
+                       typedmemmove(t.key, dst.k, k) // copy elem
+                   }
+                   if t.indirectelem() {
+                       *(*unsafe.Pointer)(dst.e) = *(*unsafe.Pointer)(e)
+                   } else {
+                       typedmemmove(t.elem, dst.e, e)
+                   }
+                   dst.i++
+                   dst.k = add(dst.k, uintptr(t.keysize))
+                   dst.e = add(dst.e, uintptr(t.elemsize))
+               }
+           }
+           // Unlink the overflow buckets & clear key/elem to help GC.
+           if h.flags&oldIterator == 0 && t.bucket.ptrdata != 0 {
+               b := add(h.oldbuckets, oldbucket*uintptr(t.bucketsize))
+               // Preserve b.tophash because the evacuation
+               // state is maintained there.
+               ptr := add(b, dataOffset)
+               n := uintptr(t.bucketsize) - dataOffset
+               memclrHasPointers(ptr, n)
+           }
+       }
+   
+   
+       if oldbucket == h.nevacuate {
+           advanceEvacuationMark(h, t, newbit)
+       }
+   }
+   
+   
+   func (h *hmap) noldbuckets() uintptr {
+       oldB := h.B
+       if !h.sameSizeGrow() {
+           oldB--
+       }
+       return bucketShift(oldB)
+   ```
+
+5. 从老桶数组中获取到待迁移的桶 b
+
+   ```Go
+   b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+   ```
+
+6. 获取到老桶数组的长度 newbit
+
+   ```Go
+   newbit := h.noldbuckets()
+   ```
+
+7. 倘若当前桶已经完成了迁移，则无需处理
+
+8. 创建一个二元数组 xy，分别承载 x 区域和 y 区域（含义定义见 9.4 小节）中的新桶位置，用于接受来自老桶数组的迁移数组；只有在增量扩容的流程中，才存在 y 区域，因此才需要对 xy 中的 y 进行定义
+
+   ```Go
+   var xy [2]evacDst
+   x := &xy[0]
+   x.b = (*bmap)(add(h.buckets, oldbucket*uintptr(t.bucketsize)))
+   x.k = add(unsafe.Pointer(x.b), dataOffset)
+   x.e = add(x.k, bucketCnt*uintptr(t.keysize))
+   
+   
+   if !h.sameSizeGrow() {
+       y := &xy[1]
+       y.b = (*bmap)(add(h.buckets, (oldbucket+newbit)*uintptr(t.bucketsize)))
+       y.k = add(unsafe.Pointer(y.b), dataOffset)
+       y.e = add(y.k, bucketCnt*uintptr(t.keysize))
+   }
+   ```
+
+9. 开启两层 for 循环，外层遍历桶链表，内层遍历每个桶中的 key-value 对：
+
+   ```Go
+   for ; b != nil; b = b.overflow(t) {
+           k := add(unsafe.Pointer(b), dataOffset)
+           e := add(k, bucketCnt*uintptr(t.keysize))
+           for i := 0; i < bucketCnt; i, k, e = i+1, add(k, uintptr(t.keysize)), add(e, uintptr(t.elemsize)) {
+              // ...
+           }
+       }
+   ```
+
+10. 取每个位置的 tophash 值进行判断，倘若当前是个空位，则将当前位置 tophash 值置为 evacuatedEmpty，开始遍历下一个位置：
+
+    ```Go
+    top := b.tophash[i]
+     if isEmpty(top) {
+          b.tophash[i] = evacuatedEmpty
+          continue
+     }
+    ```
+
+11. 基于 9-4 的规则，寻找到迁移的目的桶
+
+    ```Go
+    const evacuatedX = 2
+    const evacuatedY = 3  
+    
+    
+    k2 := k
+    var useY uint8
+    if !h.sameSizeGrow() {       
+       hash := t.hasher(k2, uintptr(h.hash0))
+       if hash&newbit != 0 {
+            useY = 1
+       }
+    }
+    b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
+    dst := &xy[useY]
+    ```
+
+12. 其中目的桶的类型定义如下：
+
+    ```Go
+    type evacDst struct {
+        b *bmap          // current destination bucket
+        i int            // key/elem index into b
+        k unsafe.Pointer // pointer to current key storage
+        e unsafe.Pointer // pointer to current elem storage
+    }
+    ```
+
+    - evacDst.b：目的地的所在桶
+    - evacDst.i：即将入桶的 key-value 对在桶中的索引
+    - evacDst.k：入桶 key 的存储指针
+    - evacDst.e：入桶 value 的存储指针
+
+13. 将 key-value 对迁移到目的桶中，并且更新目的桶结构内几个指针的指向：
+
+    ```Go
+    if dst.i == bucketCnt {
+           dst.b = h.newoverflow(t, dst.b)
+           dst.i = 0
+           dst.k = add(unsafe.Pointer(dst.b), dataOffset)
+           dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
+      }
+      dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
+      if t.indirectkey() {
+           *(*unsafe.Pointer)(dst.k) = k2 // copy pointer
+      } else {
+           typedmemmove(t.key, dst.k, k) // copy elem
+      }
+      if t.indirectelem() {
+           *(*unsafe.Pointer)(dst.e) = *(*unsafe.Pointer)(e)
+      } else {
+           typedmemmove(t.elem, dst.e, e)
+      }
+      dst.i++
+      dst.k = add(dst.k, uintptr(t.keysize))
+      dst.e = add(dst.e, uintptr(t.elemsize
+    ```
+
+14. 倘若当前迁移的桶是旧桶数组未迁移的桶中索引最小的一个，则 hmap.nevacuate 累加 1。倘若已经迁移完所有的旧桶，则会确保 hmap.flags 中，等量扩容的标识位被置为 0
+
+    ```Go
+    if oldbucket == h.nevacuate {
+          advanceEvacuationMark(h, t, newbit)
+      }
+    func advanceEvacuationMark(h *hmap, t *maptype, newbit uintptr) {
+        h.nevacuate++
+        // ...
+        if h.nevacuate == newbit { // newbit == # of oldbuckets
+            h.oldbuckets = nil
+            if h.extra != nil {
+                h.extra.oldoverflow = nil
+            }
+            h.flags &^= sameSizeGrow
+        }
+    
+    ```
+
+    
