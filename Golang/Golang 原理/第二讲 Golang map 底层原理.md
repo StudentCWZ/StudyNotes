@@ -1711,11 +1711,11 @@
 
 3. 根据 hmap 的 oldbuckets 是否空，可以判断 map 此前是否已开启扩容模式：
 
-```Go
-func (h *hmap) growing() bool {
-    return h.oldbuckets != nil
-}
-```
+   ```Go
+   func (h *hmap) growing() bool {
+       return h.oldbuckets != nil
+   }
+   ```
 
 4. 倘若此前未进入扩容模式，且 map 中 key-value 对的数量超过 8 个，且大于桶数组长度的 6.5 倍，则进入增量扩容：
 
