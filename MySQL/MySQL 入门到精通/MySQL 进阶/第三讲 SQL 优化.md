@@ -57,7 +57,59 @@
 
 ## 3-3 order by 优化
 
+1. Using filesort: 通过表的索引或全表扫描，读取满足条件的数据行，然后在排序缓冲区 sort buffer 中完成排序操作，所有不是通过索引直接返回的排序结果都叫 FileSort 排序。
+
+2. Using index: 通过有序索引顺序扫描直接返回有序数据，这种情况即为 Using index，不需要额外排序，操作效率高
+
+   ```SQL
+   # 没有创建索引时，根据 age, phone 进行排序
+   explain select id, age, phone from tb_user order by age, phone;
+   
+   # 创建索引
+   create index idx_user_age_phone on tb_user(age, phone);
+   
+   # 创建索引后，根据 age, phone 进行升序排序
+   explain select id, age, phone from tb_user order by age, phone;
+   # 创建索引后，根据 age, phone 进行降序排序
+   explain select id, age, phone from tb_user order by age, phone desc;
+   # 创建索引后，根据 age, phone 进行降序排序 ==> Using index;Using filesort: 违背最左前缀法则
+   explain select id, age, phone from tb_user order by phone, age desc;
+   # Using index;Using filesort
+   explain select id, age, phone from tb_user order by age asc, phone desc;
+   # 创建索引
+   create index idx_user_phone_ad on tb_user(age asc, phone desc);
+   # Using index ==> 建立索引，优化得到的结果
+   explain select id, age, phone from tb_user order by age asc, phone desc;
+   ```
+
+3. 小结
+   - **根据排序字段建立合适索引，多字段排序时，也遵循最左前缀法则**
+   - 尽量使用覆盖索引
+   - 多字段排序，一个升序一个降序，此时需要注意联合索引在创建时的规则(ASC/DESC)
+   - 如果不可避免地出现 filesort，大数据量排序时，可以适当增大排序缓冲区大小 sort_buffer_size(默认为 256 k)
+
 ## 3-4 group by 优化
+
+1. 在分组操作时，可以通过索引来提高效率
+
+2. 分组操作时，索引的使用也是满足最左前缀法则的
+
+   ```SQL
+   # 删除掉目前的联合索引 idx_user_pro_age_sta
+   drop index idx_user_pro_age_sta on tb_user;
+   # 执行分组操作，根据 profession 字段分组 ==> Using temproary
+   explain select profession, count(*) from tb_user group by profession;
+   # 创建索引
+   create index idx_user_pro_age_sta on tb_user(profession, age, status);
+   # 执行分组操作，根据 profession 字段分组 ==> Using index ==> 执行效率更高
+   explain select profession, count(*) from tb_user group by profession;
+   # 执行分组操作，根据 profession, age 字段分组 ==> Using index
+   explain select profession, age, count(*) from tb_user group by profession, age;
+   # 执行分组操作，根据 age 字段分组 ==> Using index;Using temproary
+   explain select age, count(*) from tb_user group by age;
+   # 执行分组操作，根据 age 字段分组 ==> Using index
+   explain select age, count(*) from tb_user where profession = '软件工程' group by age;
+   ```
 
 ## 3-5 limit 优化
 
