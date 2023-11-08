@@ -231,3 +231,38 @@
      - **字符串: 字符串的自然顺序的比较是要进行一次编码成为数值后再进行比较的**
 
    - **如果不使用自增，使用不规律的整数作为主键，那么主键索引树会使用更多的自旋次数来保证索引树叶子节点中的数据是从小到大-从左到右排列，因此性能必然比使用了自增主键的性能要差**
+
+
+## 5 联合索引和最左前缀法则
+
+1. **联合索引的特点: 使用一个索引来实现多个表中字段的索引效果**
+
+2. 最左前缀法则是表示一条 sql 语句在联合索引中有没有走索引(命中索引/走全表扫描)
+
+   ```SQL
+   # 创建联合索引
+   create index idx_a_b_c on table(a, b, c);
+   
+   # sql 语句有没有命中索引
+   
+   # 走联合索引
+   select * from table1 where a = 10;
+   # 走联合索引
+   select * from table1 where a = 10 and b = 20;
+   # 走联合索引
+   select * from table1 where a = 10 and b = 20 and c = 30;
+   # 不走联合索引
+   select * from table1 where b = 10;
+   # 不走联合索引
+   select * from table1 where b = 10 and c = 30;
+   # 走 a 索引
+   select * from table1 where a = 10 and c = 30;
+   # 不走联合索引
+   select * from table1 where c = 30;
+   # 走联合索引
+   select * from table1 where a = 10 and c = 30 and b = 20; ==> 内部优化器
+   ```
+
+   
+
+   
