@@ -355,7 +355,7 @@
 
 6. 通过在 SQL 语句前面加上 explain 关键字，执行后并不会真正的执行 SQL 语句本身，而是通过 explain 工具来分析当前这条 SQL 的性能细节：比如是什么样的查询类型、可能用到的索引及实际用到的索引，和一些额外的信息
 
-### 6.3 MySQL 的内部优化器
+## 6.3 MySQL 的内部优化器
 
 1. 在 SQL 查询开始之前，MySQL 内部优化器会进行一次自我优化，让这一次的查询性能尽可能的好
 
@@ -370,3 +370,66 @@
    ```SQL
    * select#1 */ select '1' AS `id`, '千锋 Java 厉害' AS `name` from `db_mysql_pro`.`tb_book` where true
    ```
+
+## 6.4 Explain 各个列的细节
+
+### 6.4.1 select_type 列
+
+1. 该列描述了查询的类型:
+
+   - **simple: 简单查询**
+   - **primary: 外部的主查询**
+   - **derived: 在 from 后面进行的字子查询，会产生衍生表**
+   - **subquery: 在 form 的前面进行的子查询**
+   - **union: 进行联合查询**
+
+   
+
+2. 来自简单的查询: simple 类型
+
+   ```SQL
+   explain select * from tb_book where id = 1;
+
+3. 关闭对 MySQL 衍生表的合并优化
+
+   ```SQL
+   set session optimizer_switch = 'derived_merge=off';
+   ```
+
+4. 来自于复杂的查询：除 simple 之外的其他类型
+
+   ```SQL
+   EXPLAIN select (select 1 from tb_author where id = 1) from (select * from tb_book where id = 1) der；
+   ```
+
+   - `select * from tb_book where id = 1` 这一条执行的 sql 是 from 后面的子查询，该子查询只要在 from 后面，就会生成一张衍生表，因此它的查询类型为 **derived**
+   - `select 1 from tb_author where id = 1` 这一条执行的 sql 是在 select 之后 from 之前的子查询，因此它的查询类型为 **subquery**
+   - 最外部的 `select` 语句的查询类型是 **simple**
+
+5. 对于 union 的联合查询，查询的类型是 union
+
+   ```SQL
+   explain select * from tb_book where id = 1 union select * from tb_book where id = 2;
+   ```
+
+### 6.4.2 table 列
+
+1. 这一列表示该 sql 正在访问哪一张表。也可以看出正在访问的衍生表
+
+### 6.4.3 type 列
+
+1. 通过 type 列，可以直接的看出 SQL 语句的查询性能，性能从大到小的排列
+
+   - 通过 Type 列，可以直接的看出 SQL 语句的查询性能，性能从大到小的排列
+
+     ```
+     null>system>const>er_ref>ref>range>index>ALL
+     ```
+
+   - 一般情况下我们要保证我们的 sql 类型的性能是 range 级别。不同的级别的情况:
+
+     ```
+     ```
+
+     
+
