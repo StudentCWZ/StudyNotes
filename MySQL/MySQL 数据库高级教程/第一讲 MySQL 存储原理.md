@@ -423,13 +423,77 @@
    - 通过 Type 列，可以直接的看出 SQL 语句的查询性能，性能从大到小的排列
 
      ```
-     null>system>const>er_ref>ref>range>index>ALL
+     null > system > const > er_ref > ref > range > index > ALL
      ```
 
-   - 一般情况下我们要保证我们的 sql 类型的性能是 range 级别。不同的级别的情况:
+   - 一般情况下我们要保证我们的 sql 类型的性能是 range 以上级别。
 
-     ```
+2. null 性能最好 
+
+  - 一般在使用了聚合函数操作索引列，结果直接从索引树获取即可，因此是性能最好的。
+
+    ```SQL
+    explain select min(id) from tb_book
+    ```
+
+3. system
+
+   - 很少见。它是直接和一条记录进行匹配
+
+4. const
+
+   - 使用主键索引或唯一索引和常量进行比较，这种性能非常好
+
+   ```SQL
+   explain select * from tb_book where id = 1;
+   ```
+
+5. eq_ref
+
+   - 在进行连接查询时，连接查询的条件中使用了本表的主键进行关联，因此这种类型的 sql 就是 eq_ref
+
+     ```SQL
+     explain select * from tb_book_author left join tb_book on tb_book_author.bood_id = tb_book.id;
      ```
 
-     
+6. ref
+
+   - 简单查询
+
+     - 使用普通列作为查询条件
+
+       ```SQL
+       explain select * from tb_book where name='book1';
+       ```
+
+   - 复杂查询
+
+     - 在进行连接查询时，连接查询的条件中使用了本表的联合索引列，因此这种类型的 sql 就是 ref
+
+       ```SQL
+       explain select book_id from tb_book left join tb_book_author on tb_book.id = tb_book_author.book_id;
+       ```
+
+7. range
+
+   - 在索引页上使用了范围查找，性能是 OK 的
+
+     ```SQL
+     explain select * from tb_author where id > 1;
+     ```
+
+8. index
+
+   - 在查询表中的所有记录，但是所有的记录可以直接从索引树上获取，因此这种 sql 的查询类型就是 index
+   - tb_book 中的所有列: id 和 name 都是索引列
+
+9. ALL
+
+   - 全表扫描，就是从头到尾对表中的数据扫描一遍，这种查询性能是一定要做优化的。
+
+   
+
+
+
+
 
