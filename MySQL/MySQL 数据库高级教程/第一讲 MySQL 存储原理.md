@@ -491,7 +491,60 @@
 
    - 全表扫描，就是从头到尾对表中的数据扫描一遍，这种查询性能是一定要做优化的。
 
-   
+
+### 6.4.4 id 列
+
+1. 在多个 select 中，id 越大越先执行，如果 id 相同，上面的先执行
+
+### 6.4.5 possible_keys 列
+
+1. 这一次的查询可能会用到的索引，也就是说 mysql 内部优化器会进行判断，如果这一次查询走索引性能比全表扫描的性能要差，那么内部优化器就让此次查询进行全表扫描(这样的判断依据，我们可以通过 trace 工具来查看)
+
+   ```SQL
+   explain select * from employees where name like 'custom%';
+   ```
+
+2. 这条 sql 走索引查询的行数是 500 多万，那么总的数据行数也就 500 多万，因此直接进行全表扫描性能更快
+
+   |  id  | select_type | partitions | partitions | type |     possible_keys     | key  | key_len | ref  |  rows   | filter |    Extra    |
+   | :--: | :---------: | :--------: | :--------: | :--: | :-------------------: | :--: | :-----: | :--: | :-----: | :----: | :---------: |
+   |  1   |    SMPLE    | employees  |            | ALL  | idx_name_age_position |      |         |      | 5598397 | 50.00  | Using where |
+
+### 6.4.6 key 列
+
+1. 实际该 SQL 语句使用的索引
+
+### 6.4.7 rows 列
+
+1. 该 SQL 语句可能要查询的数据条数
+
+### 6.4.8 key_len 列
+
+1. 这一列的主要作用，通过查看这一列的数值，推断出本 sql 选择了联合索引中的哪几列
+
+   ```SQL
+   -- idx_name_age_position(`name`, `age`, `position`)
+   explain select * from employees where name = 'customer1011' # key_len = 74
+   explain select * from employees where name = 'customer1011' and age = 30 # key_len = 78
+   explain select * from employees where name = 'customer1011' and age = 30  and position = 'dev' # key_len = 140
+   explain select * from employees where name = 'customer1011' and position = 'dev' # key_len = 74
+   ```
+
+2. key_len 计算规则
+   - 字符串
+     - char(n): n 字节长度
+     - varchar(n): 2 字节存储字符串长度，如果是 utf-8，则长度为 3n + 2
+   - 数值类型
+     - tinyint: 1 字节
+     - smallint: 2 字节
+     - int: 4 字节
+     - bigint: 8 字节
+   - 时间类型
+     - date: 3 字节
+     - timestamp: 4 字节
+     - datetime: 8 字节
+   - 如果字段允许为 NULL，需要 1 字节记录是否为 NULL
+   - 索引最大长度是 768 字节，当字符串过长时，mysql 会做一个类似左前缀索引的处理，将前半部分的字符提取出来做索引
 
 
 
