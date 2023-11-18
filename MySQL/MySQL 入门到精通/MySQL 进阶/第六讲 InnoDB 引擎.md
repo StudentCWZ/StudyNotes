@@ -13,7 +13,8 @@
 ## 6.2 架构
 
 1. MySQL 5.5 版本开始，默认使用 InnoDB 存储引擎，它擅长事务处理，具有崩溃恢复特性，在日常开发中使用非常广泛。下面是 InnoDB 架构图，左侧为内存结构，右侧为磁盘结构
-2. 图片后补
+
+   <img src="https://studentcwz-pic-bed.oss-cn-guangzhou.aliyuncs.com/img/MySQL%20%E8%BF%9B%E9%98%B6%E7%AF%87-InnoDB%20%E6%9E%B6%E6%9E%84.png" alt="MySQL 进阶篇-InnoDB 架构" style="zoom:50%;" />
 
 ### 6.2.1 内存架构
 
