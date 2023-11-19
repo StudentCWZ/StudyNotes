@@ -49,6 +49,78 @@
    - **0: 每秒将日志写入并刷新到磁盘一次**
    - **2: 日志在每次事务提交后写入，并每秒刷新到磁盘的一次**
 
+### 6.2.2 磁盘架构
+
+1. **System TableSpace: 系统表空间是更改缓冲区的存储区域。如果表是在系统表空间而不是每个表文件或通用表空间中创建的，它也可能包含表和索引数据。(MySQL 5.x 版本总还包含 InnoDB 数据字典，undolog 等)**
+
+2. System TableSpace 对应的参数:
+
+   - **innodb_data_file_path**
+
+3. 示例
+
+   ```SQL
+   show variables like '%data_file_path%';
+   ```
+
+4. **File-Per-Table: 每个表的文件表空间包含单个 InnoDB 表的数据和索引，并存储在文件系统上的单个数据文件中**
+
+5. File-Per-Table 对应的参数：
+
+   - **innodb_file_per_table**
+
+6. 示例
+
+   ```SQL
+   show variables like '%file_per_table%';
+   ```
+
+7. **General TableSpace: 通用表空间，需要通过 CREATE TABLESPACE 语法创建通用表空间，在创建表时，可以指定该表空间。**
+
+8. General TableSpace 相关语法
+
+   ```SQL
+   CREATE TABLESPACE xxx ADD DATAFILE 'file_name' ENGINE = engine_name;
+   ```
+
+9. **Undo Tablespaces: 撤销表空间，MySQL 实例在初始化时，会自动创建两个默认的 undo 表空间(初始大小 16 M)，用于存储 undo log 日志**
+10. **Temporary Tablespace: InnoDB 使用会话临时表空间和全局临时表空间，存储用户创建的临时表等数据**
+11. **Doublewrite Buffer files: 双写缓冲区，InnoDB 引擎将数据页从 Buffer Pool 刷新到磁盘前，先将数据页写入双写缓冲区文件中，便于系统异常时恢复数据**
+    - #ib_16384_0.dblwr
+    - #ib_16384_1.dblwr
+12. **Redo Log: 重做日志，是用来实现事务的持久性。该日志文件由两部分组成：重做日志缓冲区(redo log buffer)以及重做日志文件(redo log)，前者在内存中，后者在磁盘中，当事务提交之后会把所有修改信息存到该日志中，用于在刷新脏页到磁盘时，发生错误时，进行数据恢复使用**
+13. 以循环的方式写入重做日志文件，涉及两个文件：
+    - **ib_logfile0**
+    - **ib_logfile1**
+
+### 6.2.3 后台线程
+
+1. **Master Thread**
+
+   - 核心后台线程，负责调度其他线程，还负责将缓冲池中的数据异步刷新到磁盘中，保存数据的一致性，还包括脏页的刷新、合并插入缓存、undo 页的回收
+
+2. **IO Thread**
+
+   - 在 InnoDB 存储引擎中大量使用了 AIO 来处理 IO 请求，这样可以极大地提高数据库的性能，而 IO Thread 主要负责这些 I/O 请求的回调
+
+     |       线程类型       | 默认个数 |             职责             |
+     | :------------------: | :------: | :--------------------------: |
+     |     Read thread      |    4     |         负责读写操作         |
+     |     Write thread     |    4     |          负责写操作          |
+     |      Log thread      |    1     |  负责将日志缓冲区刷新到磁盘  |
+     | Insert buffer thread |    1     | 负责将写缓冲区内容刷新到磁盘 |
+
+3. 查看 InnoDB 状态信息来查看线程
+
+   ```SQL
+   show engine innodb status;
+   ```
+
+4. **Purge Thread**
+   - 主要用于回收事务已经提交了的 undo log，在事务提交之后，undo log 可能不用了，就用它来回收
+5. **Page Cleaner Thread**
+   - 协助 Master Thread 刷新脏页到磁盘的线程，它可以减轻 Master Thread 的工作压力，减少阻塞
+
 ## 6.3 事务原理
 
 ## 6.4 MVCC
