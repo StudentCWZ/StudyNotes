@@ -123,5 +123,32 @@
 
 ## 6.3 事务原理
 
+### 6.3.1 redo log
+
+1. 重做日志，记录的是事物提交时数据页的物理修改，是用来实现事物的持久性
+2. 该日志文件由两部分组成：重做日志缓冲(redo log buffer)以及重做日志文件(redo log file)，前者是在内存中，后者在磁盘中。当事物提交之后会把所有修改信息都存在该日志文件中，用于刷新脏页到磁盘，发生错误时，进行数据恢复使用。
+
+### 6.3.2 undo log
+
+1. **回滚日志，用于记录数据被修改前的信息，作用包含两个：提供回滚和 MVCC(多版本并发控制)**
+2. **undo log 和 redo log 记录的物理日志不一样，它是逻辑日志。可以认为当 delete 一条记录时，undo log 中会记录一条对应的 insert 记录，反之亦然，当 update 一条记录，它记录一条对应相反的 update 记录。当执行 rollback 时，就可以从 undo log 中的逻辑日志读取到相应内容并进行回滚。**
+3. **undo log 销毁: undo log 在事务执行时产生，事务提交时，并不会立即删除 undo log，因为这些日志可能还用于 mvcc**
+4. **undo log 存储: undo log 采用段的方式进行管理和记录，存放在前面介绍的 rollback segment 回滚段中，内部包含 1024 个 undo log segment**
+
 ## 6.4 MVCC
 
+### 6.4.1 基本概念
+
+1. 当前读
+
+   - 读取的是记录的最新的版本，读取时还要保证其他的并发事务不能修改当前记录，会对读取的记录进行加锁。
+
+   - 对于我们日常的操作，如：`select ... lock in share mode(共享锁)、select ... for update、update、insert、delete(排他锁)` 都是当前读
+
+2. 快照读
+   - 简单的 select(不加锁)就是快照读，快照读，读取的是记录数据的可见版本，有可能是历史版本，不加锁，非阻塞读。
+     - **Read Commit: 每次 select，都会生成一个快照读**
+     - **Repeated Read: 开启事务后的第一个 select 语句才是快照读的地方**
+     - **Serializable: 快照读会退化成为当前读**
+3. MVCC
+   - 全称：Muti-version Concurrency control，多版本并发控制。指维护一个数据的多个版本，使得读写操作没有冲突，快照读为 MySQL 实现了MVCC 提供了一个非阻塞读功能。MVCC 的具体实现，还需要依赖于数据库记录中的三个隐式字段、undo log 日志、readView
