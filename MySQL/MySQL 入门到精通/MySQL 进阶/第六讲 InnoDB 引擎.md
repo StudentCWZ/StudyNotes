@@ -221,12 +221,32 @@
 
    - trx_id: 代表是当前事务 ID
 
-   - 版本链访问规则
+   - **版本链访问规则**
 
-     - trx_id == create_trx_id ? **可以访问该版本**
-     - trx_id <= min_trx_id ? **可以访问该版本**
-     - trx_id > max_trx_id ? **不可以访问版本**
-     - min_trx_id <= trx_id <= max_trx_id ? 如果 trx_id 不在 m_ids 中是可以访问该版本的
+     - **trx_id == create_trx_id**
+       - 成立，说明数据是当前这个事物更改的
 
-     
+     - **trx_id < min_trx_id**
+       - 成立，说明数据已经提交了
+
+     - **trx_id > max_trx_id**
+       - 成立，说明该事务是在 read view 生成后才开启，则不可以访问该版本
+     - **min_trx_id <= trx_id <= max_trx_id**
+       - 如果 trx_id 不在 m_ids 中是可以访问该版本的，说明数据已经提交了
+
+7. 不同的隔离级别，生成 read view 的时机不同:
+
+   - **READ COMMITED: 在事务中每一次执行快照读时生成 read view**
+   - **REPEATED READ: 仅在事务中第一次执行快照读时生成 read view，后续复用该 read view**
+
+8. 隐藏字段、undo log 版本链、ReadView 是实现 MVCC 的原理，MVCC 和 锁保证了事务的隔离性。
+
+9. 事务的一致性是由 redo log 和 undo log 共同来保证
+
+10. 事务原理
+
+    - 原子性: undo log
+    - 持久性: redo log
+    - 一致性: undo log + redo log
+    - 隔离性: 锁 + MVCC
 
